@@ -20,17 +20,31 @@ import {
   useState
 } from "react"
 import RecentList from "@/components/RecentList"
+import { VideoInfo } from "@/types"
+import {
+  formatDuration,
+  readInfoCache,
+  writeInfoCache
+} from "@/utils/local-storage"
 import UrlInput from "@/components/UrlInput"
 
 interface FormValues {
   url: string
 }
 
+const RECENT_LS_KEY = "recent-yt"
+
 export default function Home() {
+  const inflightController = useRef<AbortController | null>(null)
+
+  const [videoInfoMap, setVideoInfoMap] = useState<Record<string, VideoInfo>>(
+    {}
+  )
+  const [recent, setRecent] = useState<string[]>([])
+
   const currentIdRef = useRef<string>("")
   const [playerSrc, setPlayerSrc] = useState<string>("")
   const [iframeLoading, setIframeLoading] = useState(false)
-  const [recent, setRecent] = useState<string[]>([])
 
   const {
     register,
@@ -39,7 +53,7 @@ export default function Home() {
     reset,
     formState: { errors, isSubmitting, isValid },
     watch
-  } = useForm<FormValues>()
+  } = useForm<FormValues>({ mode: "onChange" })
 
   const url = (watch("url") || "").trim()
 
@@ -52,7 +66,53 @@ export default function Home() {
   }, [url])
 
   const currentId = currentIdRef.current || videoId
+  const currentInfo = currentId ? videoInfoMap[currentId] : undefined
   const thumbnail = currentId ? getThumb(currentId) : ""
+
+  useEffect(() => {
+    // hydrate recent and info cache once
+    try {
+      const stored = JSON.parse(localStorage.getItem(RECENT_LS_KEY) || "[]")
+      setRecent(stored)
+    } catch {
+      setRecent([])
+    }
+    setVideoInfoMap(readInfoCache())
+  }, [])
+
+  async function fetchVideoInfo(id: string): Promise<VideoInfo | null> {
+    // try cache first
+    const cache = readInfoCache()
+    const cached = cache[id]
+    if (cached) {
+      setVideoInfoMap((m) => (m[id] ? m : { ...m, [id]: cached }))
+      return cached
+    }
+
+    inflightController.current?.abort()
+    inflightController.current = new AbortController()
+
+    const res = await fetch(`/api/youtube/fetch?id=${encodeURIComponent(id)}`, {
+      signal: inflightController.current.signal
+    })
+    if (!res.ok) return null
+
+    const data = await res.json()
+    const info: VideoInfo = {
+      id: data.id,
+      title: data.title,
+      channelTitle: data.channelTitle,
+      durationISO: data.durationISO,
+      durationSeconds: data.durationSeconds,
+      fetchedAt: Date.now()
+    }
+
+    const nextCache = { ...cache, [id]: info }
+    writeInfoCache(nextCache)
+    setVideoInfoMap(nextCache)
+
+    return info
+  }
 
   const loadVideo = (id: string, force?: boolean) => {
     if (!id) return
@@ -64,21 +124,24 @@ export default function Home() {
       `https://www.youtube-nocookie.com/embed/${id}?modestbranding=1&rel=0&playsinline=1`
     )
 
+    // recent is an array of ids
     setRecent((prev) => {
       const next = [id, ...prev.filter((x) => x !== id)].slice(0, 6)
-      localStorage.setItem("recent-yt", JSON.stringify(next))
+      localStorage.setItem(RECENT_LS_KEY, JSON.stringify(next))
       return next
     })
+
+    // fire-and-forget
+    fetchVideoInfo(id).catch(() => {})
   }
 
   const clearRecent = () => {
     setRecent([])
-    if (typeof window !== "undefined") localStorage.removeItem("recent-yt")
+    if (typeof window !== "undefined") localStorage.removeItem(RECENT_LS_KEY)
   }
 
   const onSubmit = handleSubmit((data) => {
     const { url } = data
-    console.log({ data })
     const id = extractYouTubeVideoId(url)
     if (!id) return
     loadVideo(id)
@@ -99,16 +162,11 @@ export default function Home() {
     currentIdRef.current = ""
   }
 
-  useEffect(() => {
-    const stored = localStorage.getItem("recent-yt")
-    if (stored) {
-      try {
-        setRecent(JSON.parse(stored))
-      } catch {
-        setRecent([])
-      }
-    }
-  }, [])
+  // derive VideoInfo[] for recent grid
+  const recentInfos = useMemo(
+    () => recent.map((id) => videoInfoMap[id]).filter(Boolean) as VideoInfo[],
+    [recent, videoInfoMap]
+  )
 
   return (
     <>
@@ -123,54 +181,78 @@ export default function Home() {
         <link rel="preconnect" href="https://www.youtube-nocookie.com" />
         <link rel="preconnect" href="https://i.ytimg.com" />
       </Head>
-      <>
-        <Container fluid p={5}>
-          <Stack gap={10}>
-            <Stack gap={1} textAlign="center">
-              <Heading size="lg" color="whiteAlpha.900">
-                Distraction-Reduced YouTube Viewer
-              </Heading>
-              <Text color="whiteAlpha.700" fontSize="sm">
-                Uses YouTube’s privacy-enhanced embeds. No ad-circumvention.
-              </Text>
-            </Stack>
-            <Stack>
-              <UrlInput
-                {...register("url", { required: "Paste a YouTube link" })}
-                onPaste={handlePaste}
-                error={errors.url?.message}
-              />
-              <Flex
-                gap={2}
-                direction={{ base: "column", md: "row" }}
-                justify={"flex-end"}
+
+      <Container fluid p={5}>
+        <Stack gap={10}>
+          <Stack gap={1} textAlign="center">
+            <Heading size="lg" color="whiteAlpha.900">
+              Distraction-Reduced YouTube Viewer
+            </Heading>
+            <Text color="whiteAlpha.700" fontSize="sm">
+              Uses YouTube’s privacy-enhanced embeds. No ad-circumvention.
+            </Text>
+          </Stack>
+
+          <Stack>
+            <UrlInput
+              {...register("url", { required: "Paste a YouTube link" })}
+              onPaste={handlePaste}
+              error={errors.url?.message}
+            />
+            <Flex
+              gap={2}
+              direction={{ base: "column", md: "row" }}
+              justify={"flex-end"}
+            >
+              <Button
+                disabled={!isValid}
+                loading={isSubmitting}
+                onClick={onSubmit}
+                borderRadius="full"
+                size="lg"
+                px={10}
+                _hover={{ transform: "translateY(-1px)" }}
+                bgGradient={"to-r"}
+                // If using Chakra, consider:
+                // bgGradient="linear(to-r, teal.300, cyan.400)"
+                // and remove the custom gradientFrom/To props
+                gradientFrom={"teal.300"}
+                gradientTo={"cyan.400"}
+                color="gray.900"
               >
-                <Button
-                  disabled={!isValid}
-                  loading={isSubmitting}
-                  onClick={onSubmit}
-                  borderRadius="full"
-                  size="lg"
-                  px={10}
-                  _hover={{ transform: "translateY(-1px)" }}
-                  bgGradient={"to-r"}
-                  gradientFrom={"teal.300"}
-                  gradientTo={"cyan.400"}
-                  color="gray.900"
-                >
-                  Play without Distractions
-                </Button>
-                <Button
-                  onClick={handleReset}
-                  borderRadius="full"
-                  size={"lg"}
-                  px={10}
-                  variant={"outline"}
-                >
-                  Reset
-                </Button>
+                Play without Distractions
+              </Button>
+              <Button
+                onClick={handleReset}
+                borderRadius="full"
+                size={"lg"}
+                px={10}
+                variant={"outline"}
+              >
+                Reset
+              </Button>
+            </Flex>
+          </Stack>
+
+          <Stack gap={1}>
+            {currentInfo ? (
+              <Flex
+                justify="space-between"
+                align="center"
+                px={3}
+                py={2}
+                borderRadius="md"
+                bg="blackAlpha.400"
+              >
+                <Text fontSize="sm">
+                  <b>{currentInfo.title}</b> — {currentInfo.channelTitle}
+                </Text>
+                <Text fontSize="sm" opacity={0.8}>
+                  {formatDuration(currentInfo.durationSeconds)}
+                </Text>
               </Flex>
-            </Stack>
+            ) : null}
+
             {playerSrc ? (
               <div style={{ position: "relative" }}>
                 {!iframeLoading ? null : (
@@ -198,7 +280,7 @@ export default function Home() {
                     style={{
                       border: 0,
                       borderRadius: 12,
-                      opacity: iframeLoading ? 0 : 1, // hide the iframe visually until it loads
+                      opacity: iframeLoading ? 0 : 1,
                       transition: "opacity .2s ease"
                     }}
                   />
@@ -206,13 +288,14 @@ export default function Home() {
               </div>
             ) : null}
           </Stack>
-          <RecentList
-            items={recent}
-            onClickVideo={(id) => loadVideo(id)}
-            onClear={clearRecent}
-          />
-        </Container>
-      </>
+        </Stack>
+
+        <RecentList
+          items={recentInfos}
+          onClickVideo={(id) => loadVideo(id)}
+          onClear={clearRecent}
+        />
+      </Container>
     </>
   )
 }
