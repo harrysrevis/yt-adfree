@@ -39,3 +39,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# .prettierignore
+node_modules
+.next
+.out
+.turbo
+.vercel
+coverage
+build

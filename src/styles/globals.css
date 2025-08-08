@@ -14,14 +14,21 @@ html,
 body {
   max-width: 100vw;
   overflow-x: hidden;
+    background: radial-gradient(circle at 30% 30%, #ff9966, transparent 50%),
+    radial-gradient(circle at 70% 70%, #6699ff, transparent 50%),
+    radial-gradient(circle at 80% 20%, #ff6666, transparent 50%),
+    #1a1a1a; /* base dark background */
+    background-blend-mode: screen;
+    background-size: cover;
 }
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35); /* adjust opacity */
+    z-index: 0; /* ensure it’s behind your content */
+    pointer-events: none;
 }
 
 * {
