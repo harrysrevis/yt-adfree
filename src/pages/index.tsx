@@ -126,7 +126,7 @@ export default function Home() {
 
     // recent is an array of ids
     setRecent((prev) => {
-      const next = [id, ...prev.filter((x) => x !== id)].slice(0, 6)
+      const next = [id, ...prev.filter((x) => x !== id)].slice(0, 20)
       localStorage.setItem(RECENT_LS_KEY, JSON.stringify(next))
       return next
     })
